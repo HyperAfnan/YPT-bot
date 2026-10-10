@@ -1,0 +1,216 @@
+# YPT Analytics & Challenge Synchronization Platform Documentation
+
+This document provides a comprehensive guide to the **YPT Analytics Checker & Challenge Synchronization** service. It describes each feature, architecture components, configuration, database models, synchronization workflows, and operational commands.
+
+---
+
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Architecture & Technology Stack](#architecture--technology-stack)
+3. [Environment Configuration (SPOC)](#environment-configuration-spoc)
+4. [Database & Prisma Models](#database--prisma-models)
+5. [Core Features & CLI Tools](#core-features--cli-tools)
+   - [A. Challenge Sync (`challenge_sync`)](#a-challenge-sync-challenge_sync)
+   - [B. Live Study Log Ingestion (`ingest`)](#b-live-study-log-ingestion-ingest)
+   - [C. Unified Member Leaderboard & Aggregation](#c-unified-member-leaderboard--aggregation)
+   - [D. REST API Server](#d-rest-api-server)
+6. [Strict UTC Time Guarantee](#strict-utc-time-guarantee)
+7. [Admin Override Protection (Law L5)](#admin-override-protection-law-l5)
+8. [Testing & Verification](#testing--verification)
+
+---
+
+## 1. Overview
+
+The service acts as the synchronization bridge between the **Yeolpumta (YPT)** mobile study tracking platform and the **HoldMeToIt** PostgreSQL database.
+
+It solves three primary challenges:
+1. **Real-time Live Telemetry**: Extracting active study states, paused states, subjects, and study duration seconds from private/public YPT groups without requiring a continuous active user timer.
+2. **Dynamic Challenge Ingestion**: Associating live YPT telemetry with active database challenges (`Challenge`) and participants (`ChallengeParticipant`) using strict **UTC day buckets**.
+3. **Historical Backfill & Multi-Day Synchronization**: Synchronizing study hours from the start of the challenge (Monday) to the present day into `DailyStudyLogV2` (`study_logs_v2`), preserving historical integrity and manual admin overrides.
+
+---
+
+## 2. Architecture & Technology Stack
+
+- **Runtime**: Node.js (ES Modules, Node >= 20)
+- **Web Framework**: Express 5
+- **ORM / Database**: Prisma 6.8.2 connecting to Supabase PostgreSQL (via Session Pooler and Direct Connection)
+- **Test Runner**: Node.js native test runner (`node --test`)
+- **Directory Structure**:
+  ```text
+  ├── prisma/
+  │   └── schema.prisma         # Prisma data models (DailyStudyLogV2, Challenge, User, etc.)
+  ├── src/
+  │   ├── config/
+  │   │   └── env.js            # Single Point of Contact (SPOC) for environment variables
+  │   ├── db.js                 # PrismaClient singleton with connection pooling
+  │   ├── db/
+  │   │   └── challengeService.js # UTC active challenge and participant map queries
+  │   ├── sync/
+  │   │   ├── ingestStudyLogs.js  # Live YPT telemetry ingestion into DailyStudyLogV2
+  │   │   └── challenge_sync.js   # Monday-to-today ingestion & historical sync pipeline
+  │   ├── server.js             # Express REST API & scheduled background sync
+  │   └── yptService.js         # YPT API client (auth, group telemetry, multi-group aggregation)
+  ├── test/
+  │   ├── challenge-sync.test.js # Unit/integration tests for challenge_sync
+  │   ├── ingest-utc.test.js    # Tests for UTC date normalization and participant resolution
+  │   └── yptService.test.js    # Tests for multi-group deduplication and fault tolerance
+  └── package.json
+  ```
+
+---
+
+## 3. Environment Configuration (SPOC)
+
+All environment variables are validated and exported through a single module: [`src/config/env.js`](file:///home/afnan/Projects/YPT/src/config/env.js). No other file should directly call `process.env`.
+
+| Variable | Description | Example / Default |
+| :--- | :--- | :--- |
+| `DATABASE_URL` | PostgreSQL connection pooler URI (Port 6543, `pgbouncer=true`) | `postgresql://...@...pooler.supabase.com:6543/postgres?pgbouncer=true` |
+| `DIRECT_URL` | Direct PostgreSQL connection for migrations (Port 5432) | `postgresql://...@...pooler.supabase.com:5432/postgres` |
+| `YPT_EMAIL` | Account email for YPT API authentication | `bot@example.com` |
+| `YPT_PASSWORD` | Account password for YPT API authentication | `••••••••` |
+| `YPT_GROUP_IDS` | Comma-separated list of YPT group IDs to scrape | `6814572,6487271` |
+| `ACTIVE_CHALLENGE_ID` | Optional override challenge ID (if omitted, dynamically queries DB in UTC) | `cmuub6ijq0003sb4eytzy2262` |
+| `PORT` | Express server HTTP port | `3000` |
+
+---
+
+## 4. Database & Prisma Models
+
+The target table for study hours is `DailyStudyLogV2`, mapped to PostgreSQL table `study_logs_v2`:
+
+```prisma
+model DailyStudyLogV2 {
+  id              String   @id @default(cuid())
+  participantId   String
+  logDate         DateTime @db.Date
+  durationSeconds Int      @default(0)
+  status          String?
+
+  isOverride     Boolean @default(false)
+  overrideById   String?
+  overrideReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  participant ChallengeParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  overrideBy  User?                @relation("LogOverrideAdminV2", fields: [overrideById], references: [id], onDelete: SetNull)
+
+  @@unique([participantId, logDate])
+  @@index([participantId])
+  @@index([logDate])
+  @@map("study_logs_v2")
+}
+```
+
+### Participant Mapping
+- YPT member ID (`userId` or `ud`) is matched against `User.yptId`.
+- The participant is resolved via `ChallengeParticipant` where `challengeId = activeChallenge.id` and `userId = User.id`.
+
+---
+
+## 5. Core Features & CLI Tools
+
+### A. Challenge Sync (`challenge_sync`)
+Ingests and updates all study hours in `DailyStudyLogV2` from **Monday** of the active challenge up to today.
+
+```bash
+npm run challenge_sync
+```
+
+#### Workflow:
+1. **Dynamic Challenge Detection**: Queries PostgreSQL for the ongoing challenge in UTC (`startAt <= nowUtc AND endAt >= nowUtc`).
+2. **Phase 1: Historical Days Backfill (Monday to Yesterday)**:
+   - Queries historical study records from `DailyStudyLog` (V1).
+   - Upserts entries for Monday through yesterday into `DailyStudyLogV2`.
+   - Sets status to `"OFFLINE"`.
+   - Preserves `durationSeconds` and admin override details (`isOverride`, `overrideById`, `overrideReason`).
+   - If an existing record in `DailyStudyLogV2` already has `isOverride: true`, it is protected and skipped.
+3. **Phase 2: Today's Live YPT Telemetry**:
+   - Scrapes live telemetry from YPT groups in `env.YPT_GROUP_IDS`.
+   - Maps active members to `ChallengeParticipant` records.
+   - Upserts real-time `durationSeconds` and status:
+     - `"STUDYING"`: Member has an active study session (`member.isStudying === true`, whether running or paused).
+     - `"OFFLINE"`: Member has no active study session (`member.isStudying === false`).
+4. **Console Breakdown**: Displays a structured table summarizing each day from Monday to today.
+
+---
+
+### B. Live Study Log Ingestion (`ingest`)
+Performs a live scrape of today's study telemetry and writes directly to `DailyStudyLogV2`:
+
+```bash
+npm run ingest
+```
+
+Also exposed via REST API endpoint:
+```bash
+curl -X POST http://localhost:3000/sync
+```
+
+---
+
+### C. Unified Member Leaderboard & Aggregation
+When an account belongs to multiple groups/channels, `getAggregatedMembers` consolidates members into a single grid:
+- Deduplicates members appearing across multiple groups.
+- Selects the **highest study duration** recorded across groups.
+- Prioritizes active study states (`isStudying: true`, unpaused).
+- Combines group memberships into `groupIds` and `groupNames`.
+
+---
+
+### D. REST API Server
+
+Start the Express server:
+```bash
+npm start
+```
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/health` | Server status and authenticated account info. |
+| `GET` | `/members` | Unified and deduplicated members across all joined groups. |
+| `GET` | `/groups` | List all joined groups. Supports `?q=<keyword>` and `?refresh=true`. |
+| `GET` | `/groups/:groupId/members` | Live telemetry for members of a specific group. |
+| `POST` | `/sync` | Trigger an immediate live YPT scrape and database ingestion into `study_logs_v2`. |
+
+---
+
+## 6. Strict UTC Time Guarantee
+
+To prevent timezone drift and misalignment across international participants:
+- All challenge date queries evaluate in UTC: `startAt <= nowUtc AND endAt >= nowUtc`.
+- All `logDate` records in `study_logs_v2` are normalized to UTC midnight:
+  ```js
+  new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0, 0));
+  ```
+- No local timezone offsets are applied to date bucket boundaries.
+
+---
+
+## 7. Admin Override Protection (Law L5)
+
+Platform administrators may manually adjust study hours or grant leaves through the frontend dashboard:
+- When `isOverride: true` is set on a `DailyStudyLogV2` record, automated YPT syncs and historical backfills **will never overwrite** `durationSeconds`.
+- For live records, live status (e.g. `"STUDYING"`) continues to update so dashboards show real-time activity while preserving the adjusted study duration.
+
+---
+
+## 8. Testing & Verification
+
+Run the full automated test suite:
+```bash
+npm test
+```
+
+All 13 tests across 6 test suites validate:
+- Multi-group member aggregation and duplicate removal.
+- Fault tolerance when individual groups return errors.
+- Strict UTC date normalization and rollover safety.
+- Status derivation (`STUDYING`, `PAUSED`, `OFFLINE`).
+- Dynamic UTC challenge and participant resolution.
+- Historical Monday backfill, override preservation, and idempotency.
