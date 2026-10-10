@@ -218,9 +218,12 @@ export async function getGroupMembers(token, groupId) {
     }
 
     // Real-time calculation: If currently studying, add elapsed time since session started
+    const sessionElapsedMs =
+      isStudying && sessionStartMs && now > sessionStartMs ? now - sessionStartMs : 0;
+
     let liveStudyMs = recordedStudyMs;
-    if (isStudying && sessionStartMs && now > sessionStartMs) {
-      liveStudyMs = recordedStudyMs + (now - sessionStartMs);
+    if (sessionElapsedMs > 0) {
+      liveStudyMs = recordedStudyMs + sessionElapsedMs;
     }
 
     return {
@@ -234,6 +237,8 @@ export async function getGroupMembers(token, groupId) {
       todayStudyTime: formatMs(recordedStudyMs),
       liveStudyMs,
       liveStudyTime: formatMs(liveStudyMs),
+      sessionStartMs,
+      sessionElapsedMs,
       studiconId: m.sd || m.si || -1,
       hasCustomAvatar: Boolean(m.hasCustomAvatar),
       avatarUrl: m.hasCustomAvatar
@@ -302,6 +307,12 @@ export async function getAggregatedMembers(token, groups) {
         if (member.todayStudyMs > existing.todayStudyMs) {
           existing.todayStudyMs = member.todayStudyMs;
           existing.todayStudyTime = member.todayStudyTime;
+        }
+
+        // Propagate session telemetry (highest session elapsed wins)
+        if ((member.sessionElapsedMs || 0) > (existing.sessionElapsedMs || 0)) {
+          existing.sessionElapsedMs = member.sessionElapsedMs;
+          existing.sessionStartMs = member.sessionStartMs;
         }
 
         // Active studying takes priority
