@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { prisma } from '../db.js';
 import { env } from '../config/env.js';
-import { clampDailyStudySeconds, MAX_DAILY_STUDY_SECONDS } from '../config/limits.js';
+import { clampDailyStudySeconds, cappedLiveStudyMs, MAX_DAILY_STUDY_SECONDS, MAX_CONTINUOUS_SESSION_MS } from '../config/limits.js';
 import { getActiveChallenge, getParticipantMap } from '../db/challengeService.js';
 import { signIn, splashLogin, getAggregatedMembers } from '../yptService.js';
 
@@ -78,6 +78,7 @@ export async function ingestGroupMembersToDailyStudyLogs(groupId, members, nowUt
   let unlinkedCount = 0;
   let skippedOverrides = 0;
   let cappedCount = 0;
+  let sessionCappedCount = 0;
   let upsertedCount = 0;
 
   const upsertOperations = [];
@@ -97,14 +98,17 @@ export async function ingestGroupMembersToDailyStudyLogs(groupId, members, nowUt
     matchedCount++;
 
     // Calculate real-time integer seconds using liveStudyMs to capture ongoing active timer elapsed time
+    // Continuous sessions are capped at 4h before the daily 14h clamp is applied.
+    const cappedLiveMs = cappedLiveStudyMs(member.todayStudyMs, member.sessionElapsedMs);
     const studyMs = Math.max(
-      Number(member.liveStudyMs || 0),
+      cappedLiveMs,
       Number(member.todayStudyMs || 0),
       Number(member.studyMs || 0)
     );
     const rawSeconds = Math.floor(studyMs / 1000);
     const durationSeconds = clampDailyStudySeconds(rawSeconds);
     if (rawSeconds > MAX_DAILY_STUDY_SECONDS) cappedCount++;
+    if (Number(member.sessionElapsedMs || 0) > MAX_CONTINUOUS_SESSION_MS) sessionCappedCount++;
     const status = deriveStudyStatus(member);
 
     // 4. Admin Override Safety (Law L5)
@@ -155,7 +159,7 @@ export async function ingestGroupMembersToDailyStudyLogs(groupId, members, nowUt
   const durationMs = Date.now() - startTime;
   console.log(
     `✅ [Ingest] Challenge "${challenge.title}" (${challenge.id}) | Date: ${logDate.toISOString().slice(0, 10)} UTC: ` +
-    `${matchedCount} matched, ${upsertedCount} upserted, ${skippedOverrides} overrides protected, ${cappedCount} capped at 14h, ${unlinkedCount} unlinked (${durationMs}ms)`
+    `${matchedCount} matched, ${upsertedCount} upserted, ${skippedOverrides} overrides protected, ${cappedCount} capped at 14h, ${sessionCappedCount} sessions capped at 4h, ${unlinkedCount} unlinked (${durationMs}ms)`
   );
 
   return {
@@ -167,6 +171,7 @@ export async function ingestGroupMembersToDailyStudyLogs(groupId, members, nowUt
     unlinkedCount,
     skippedOverrides,
     cappedCount,
+    sessionCappedCount,
     upsertedCount,
     durationMs,
   };

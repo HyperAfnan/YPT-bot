@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { prisma } from '../db.js';
 import { env } from '../config/env.js';
-import { clampDailyStudySeconds, MAX_DAILY_STUDY_SECONDS } from '../config/limits.js';
+import { clampDailyStudySeconds, cappedLiveStudyMs, MAX_DAILY_STUDY_SECONDS, MAX_CONTINUOUS_SESSION_MS } from '../config/limits.js';
 import { getActiveChallenge, getParticipantMap } from '../db/challengeService.js';
 import { computeUtcLogDate, deriveStudyStatus } from './ingestStudyLogs.js';
 import { signIn, splashLogin, getAggregatedMembers } from '../yptService.js';
@@ -161,6 +161,7 @@ export async function syncChallengeFromMonday(options = {}) {
   let liveMatched = 0;
   let liveOverridesSkipped = 0;
   let liveCapped = 0;
+  let liveSessionCapped = 0;
 
   if (skipYpt) {
     log('\n⏭️ [Phase 2] Skipping live YPT scraping as requested (skipYpt=true).');
@@ -188,14 +189,16 @@ export async function syncChallengeFromMonday(options = {}) {
 
         liveMatched++;
 
+        const cappedLiveMs = cappedLiveStudyMs(member.todayStudyMs, member.sessionElapsedMs);
         const studyMs = Math.max(
-          Number(member.liveStudyMs || 0),
+          cappedLiveMs,
           Number(member.todayStudyMs || 0),
           Number(member.studyMs || 0)
         );
         const rawSeconds = Math.floor(studyMs / 1000);
         const durationSeconds = clampDailyStudySeconds(rawSeconds);
         if (rawSeconds > MAX_DAILY_STUDY_SECONDS) liveCapped++;
+        if (Number(member.sessionElapsedMs || 0) > MAX_CONTINUOUS_SESSION_MS) liveSessionCapped++;
         const status = deriveStudyStatus(member);
 
         const existingV2 = await prisma.dailyStudyLogV2.findUnique({
@@ -244,7 +247,7 @@ export async function syncChallengeFromMonday(options = {}) {
         liveUpserted++;
       }
 
-      log(`✅ [Phase 2 Complete] Matched ${liveMatched} participants, upserted ${liveUpserted} live logs (${liveOverridesSkipped} overrides protected, ${liveCapped} capped at 14h).`);
+      log(`✅ [Phase 2 Complete] Matched ${liveMatched} participants, upserted ${liveUpserted} live logs (${liveOverridesSkipped} overrides protected, ${liveCapped} capped at 14h, ${liveSessionCapped} sessions capped at 4h).`);
     } catch (err) {
       console.error('❌ [Phase 2 Error] Failed to scrape live YPT data:', err.message);
     }
@@ -296,6 +299,7 @@ export async function syncChallengeFromMonday(options = {}) {
     liveUpserted,
     liveOverridesSkipped,
     liveCapped,
+    liveSessionCapped,
     dailySummary,
     durationMs,
   };
