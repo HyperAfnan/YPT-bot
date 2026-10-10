@@ -6,7 +6,10 @@ import {
   getJoinedGroups,
   searchJoinedGroups,
   getGroupMembers,
+  getAggregatedMembers,
 } from './yptService.js';
+import { ingestGroupMembersToDailyStudyLogs } from './sync/ingestStudyLogs.js';
+import { env } from './config/env.js';
 
 // Global state holding session and cached joined groups
 const state = {
@@ -19,10 +22,10 @@ const state = {
  * Interactive prompt for Email and Password in CLI
  */
 async function promptCredentials() {
-  if (process.env.YPT_EMAIL && process.env.YPT_PASSWORD) {
+  if (env.YPT_EMAIL && env.YPT_PASSWORD) {
     return {
-      email: process.env.YPT_EMAIL.trim(),
-      password: process.env.YPT_PASSWORD.trim(),
+      email: env.YPT_EMAIL,
+      password: env.YPT_PASSWORD,
     };
   }
 
@@ -110,6 +113,45 @@ function displayGroupMembers(group, members) {
 }
 
 /**
+ * Log unified group members in a single structured grid with duplicates removed
+ */
+function displayUnifiedMembers(members, totalGroupsCount = 1, duplicatesRemoved = 0) {
+  if (!members || members.length === 0) {
+    console.log('\n⚠️  No members found across joined groups.');
+    return;
+  }
+
+  const groupText = totalGroupsCount === 1 ? '1 group/channel' : `${totalGroupsCount} groups/channels`;
+  console.log(
+    `\n👥 Unified Leaderboard (${members.length} unique members across ${groupText}${
+      duplicatesRemoved > 0 ? `, ${duplicatesRemoved} duplicate(s) merged` : ''
+    }):`
+  );
+  console.table(
+    members.map((m, index) => {
+      const hoursDecimal = (m.liveStudyMs / (1000 * 60 * 60)).toFixed(2);
+      const statusLabel = m.isStudying
+        ? m.isPaused
+          ? '⏸️ Paused'
+          : '🔥 Studying'
+        : '💤 Offline';
+
+      return {
+        Rank: `#${index + 1}`,
+        Nickname: m.nickname,
+        'Study Duration': m.liveStudyTime,
+        'Hours (Dec)': `${hoursDecimal} hrs`,
+        Status: statusLabel,
+        Subject: m.currentSubject || '-',
+        'Group(s)': Array.isArray(m.groupNames) ? m.groupNames.join(', ') : m.groupName || '-',
+        'User ID': m.userId,
+      };
+    })
+  );
+}
+
+
+/**
  * Main application entrypoint
  */
 async function startServer() {
@@ -137,14 +179,15 @@ async function startServer() {
     state.joinedGroups = await getJoinedGroups(state.token);
     displayJoinedGroups(state.joinedGroups);
 
-    // 5. Fetch and log all members and their study hours for each joined group
-    for (const group of state.joinedGroups) {
-      console.log(`\n⏳ Fetching members & study hours for "${group.name}" (ID: ${group.id})...`);
+    // 5. Fetch and log aggregated members across all joined groups in a single unified grid
+    if (state.joinedGroups.length > 0) {
+      console.log(`\n⏳ Fetching & aggregating members across ${state.joinedGroups.length} group(s)...`);
       try {
-        const members = await getGroupMembers(state.token, group.id);
-        displayGroupMembers(group, members);
+        const aggregated = await getAggregatedMembers(state.token, state.joinedGroups);
+        displayUnifiedMembers(aggregated.members, aggregated.successfulGroups, aggregated.duplicatesRemoved);
+        await ingestGroupMembersToDailyStudyLogs('all', aggregated.members);
       } catch (err) {
-        console.error(`❌ Could not load members for "${group.name}": ${err.message}`);
+        console.error(`❌ Could not load or ingest aggregated members: ${err.message}`);
       }
     }
 
@@ -237,30 +280,89 @@ async function startServer() {
       }
     });
 
-    const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => {
+    /**
+     * GET /members (and /groups/members) - Fetch unified, deduplicated members across all joined groups
+     * Query params:
+     *   ?log=true   (Print unified table to console)
+     *   ?q=keyword  (Search within members by nickname, subject, or group)
+     */
+    const handleUnifiedMembers = async (req, res) => {
+      try {
+        const { q, log } = req.query;
+        const aggregated = await getAggregatedMembers(state.token, state.joinedGroups);
+
+        let filteredMembers = aggregated.members;
+        if (q) {
+          const query = String(q).trim().toLowerCase();
+          filteredMembers = filteredMembers.filter(
+            (m) =>
+              m.nickname.toLowerCase().includes(query) ||
+              (m.currentSubject && m.currentSubject.toLowerCase().includes(query)) ||
+              (m.groupNames && m.groupNames.some((gn) => gn.toLowerCase().includes(query))) ||
+              String(m.userId) === query
+          );
+        }
+
+        if (log === 'true') {
+          displayUnifiedMembers(filteredMembers, aggregated.successfulGroups, aggregated.duplicatesRemoved);
+        }
+
+        res.json({
+          success: true,
+          totalGroups: state.joinedGroups.length,
+          successfulGroups: aggregated.successfulGroups,
+          uniqueMemberCount: filteredMembers.length,
+          totalRawMembers: aggregated.totalRawCount,
+          duplicatesRemoved: aggregated.duplicatesRemoved,
+          members: filteredMembers,
+        });
+      } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    };
+
+    app.get('/members', handleUnifiedMembers);
+    app.get('/groups/members', handleUnifiedMembers);
+
+    /**
+     * POST /sync - On-demand trigger to refresh YPT and ingest into DailyStudyLogV2
+     */
+    app.post('/sync', async (req, res) => {
+      try {
+        console.log('⚡ Manual sync requested via POST /sync');
+        const aggregated = await getAggregatedMembers(state.token, state.joinedGroups);
+        const result = await ingestGroupMembersToDailyStudyLogs('all', aggregated.members);
+        res.json({ success: true, ...result });
+      } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+
+    const PORT = env.PORT || process.env.PORT || 3000;
+    app.listen(PORT, '0.0.0.0', () => {
       console.log(`\n🚀 YPT Analytics Server listening on http://localhost:${PORT}`);
       console.log('   Available API Endpoints:');
+      console.log(`   - GET  http://localhost:${PORT}/members             (Unified deduplicated members list)`);
       console.log(`   - GET  http://localhost:${PORT}/groups             (List all joined groups)`);
       console.log(`   - GET  http://localhost:${PORT}/groups?q=<keyword> (Search within joined groups)`);
-      console.log(`   - GET  http://localhost:${PORT}/groups/:id/members (Get hourly/live member study times)`);
-      console.log(`   - GET  http://localhost:${PORT}/health             (Status & Account info)\n`);
+      console.log(`   - GET  http://localhost:${PORT}/groups/:id/members (Get group member study times)`);
+      console.log(`   - GET  http://localhost:${PORT}/health             (Status & Account info)`);
+      console.log(`   - POST http://localhost:${PORT}/sync               (Ingest study logs into DailyStudyLogV2)\n`);
 
-      // 7. Automatic periodic background logger (every hour by default)
-      const intervalMinutes = parseInt(process.env.REFRESH_INTERVAL_MINUTES || '60', 10);
+      // 7. Automatic periodic background logger & database syncer (every 5 minutes by default)
+      const intervalMinutes = parseInt(process.env.REFRESH_INTERVAL_MINUTES || '5', 10);
       if (intervalMinutes > 0 && state.joinedGroups.length > 0) {
         console.log(`⏱️  Auto-logger active: Refreshing & logging study hours every ${intervalMinutes} minute(s).\n`);
         setInterval(async () => {
           console.log(`\n======================================================`);
-          console.log(`[${new Date().toLocaleTimeString()}] ⏰ Hourly Update: Group Members & Study Hours`);
+          console.log(`[${new Date().toLocaleTimeString()}] ⏰ Periodic Update (${intervalMinutes}m): Unified Members & Study Hours`);
           console.log(`======================================================`);
-          for (const group of state.joinedGroups) {
-            try {
-              const members = await getGroupMembers(state.token, group.id);
-              displayGroupMembers(group, members);
-            } catch (err) {
-              console.error(`❌ Hourly update error for "${group.name}": ${err.message}`);
-            }
+          try {
+            const aggregated = await getAggregatedMembers(state.token, state.joinedGroups);
+            displayUnifiedMembers(aggregated.members, aggregated.successfulGroups, aggregated.duplicatesRemoved);
+            await ingestGroupMembersToDailyStudyLogs('all', aggregated.members);
+          } catch (err) {
+            console.error(`❌ Hourly update error: ${err.message}`);
           }
         }, intervalMinutes * 60 * 1000);
       }

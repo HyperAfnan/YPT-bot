@@ -1,0 +1,208 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  PARTICIPANT
+  ADMIN
+  DEV
+}
+
+enum ChallengeFormat {
+  TEAM_VS_TEAM
+  DUOS
+  SOLOS
+}
+
+enum ParticipantStatus {
+  NORMAL
+  DEFICIT
+  EXCUSED
+  PUNISHED
+}
+
+// ---------------------------------------------------------------------------
+// HoldMeToIt Platform Models
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+
+  discordId   String?  @unique
+  yptId       String?  @unique
+  username    String?
+  displayName String?
+  role        UserRole @default(PARTICIPANT)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  participations   ChallengeParticipant[]
+  overriddenLogsV2 DailyStudyLogV2[]      @relation("LogOverrideAdminV2")
+}
+
+model Challenge {
+  id               String          @id @default(cuid())
+  title            String
+  format           ChallengeFormat
+  startAt          DateTime
+  endAt            DateTime
+  eventBannerUrl   String?
+  punishmentPfpUrl String?
+  hostId           String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  teams        Team[]
+  participants ChallengeParticipant[]
+
+  @@index([hostId])
+}
+
+model Team {
+  id          String  @id @default(cuid())
+  challengeId String
+  name        String
+  color       String?
+  iconEmoji   String?
+  mascotUrl   String?
+  maxMembers  Int?
+  sortOrder   Int     @default(0)
+
+  challenge    Challenge              @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  participants ChallengeParticipant[]
+
+  @@unique([challengeId, name])
+  @@index([challengeId])
+}
+
+model ChallengeParticipant {
+  id            String            @id @default(cuid())
+  challengeId   String
+  userId        String
+  teamId        String?
+  targetSeconds Int               @default(0)
+  status        ParticipantStatus @default(NORMAL)
+
+  enrolledAt DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  challenge Challenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team      Team?     @relation(fields: [teamId], references: [id], onDelete: SetNull)
+
+  dailyStudyLogsV2 DailyStudyLogV2[]
+
+  @@unique([challengeId, userId])
+  @@index([challengeId])
+  @@index([teamId])
+  @@index([userId])
+}
+
+model DailyStudyLogV2 {
+  id              String   @id @default(cuid())
+  participantId   String
+  logDate         DateTime @db.Date
+  durationSeconds Int      @default(0)
+  status          String?
+
+  isOverride     Boolean @default(false)
+  overrideById   String?
+  overrideReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  participant ChallengeParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  overrideBy  User?                @relation("LogOverrideAdminV2", fields: [overrideById], references: [id], onDelete: SetNull)
+
+  @@unique([participantId, logDate])
+  @@index([participantId])
+  @@index([logDate])
+  @@map("study_logs_v2")
+}
+
+// ---------------------------------------------------------------------------
+// YPT Collector Models
+// ---------------------------------------------------------------------------
+
+model Group {
+  id          String   @id // YPT Group ID
+  name        String
+  category    String?
+  owner       String?
+  role        String?
+  memberCount Int      @default(0)
+  maxCapacity Int      @default(0)
+  isPrivate   Boolean  @default(false)
+  notice      String?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members    Member[]
+  dailyStats DailyStat[]
+}
+
+model Member {
+  id              String   @id // YPT User ID
+  groupId         String   // Foreign key to Group
+  nickname        String
+  category        String?
+  studiconId      Int?
+  hasCustomAvatar Boolean  @default(false)
+  avatarUrl       String?
+
+  isStudying     Boolean   @default(false)
+  isPaused       Boolean   @default(false)
+  currentSubject String?
+  lastActiveAt   DateTime?
+  lastFetchedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  group      Group?      @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  dailyStats DailyStat[]
+
+  @@index([groupId])
+}
+
+model DailyStat {
+  id              String    @id @default(cuid())
+  memberId        String
+  groupId         String
+  date            DateTime  @db.Date
+  studySeconds    Int       @default(0)
+  isStudying      Boolean   @default(false)
+  isPaused        Boolean   @default(false)
+  currentSubject  String?
+  isFinalized     Boolean   @default(false)
+  finalizedAt     DateTime?
+  lastFetchedAt   DateTime  @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  member Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  group  Group? @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([memberId, date])
+  @@index([groupId, date])
+  @@index([date])
+}

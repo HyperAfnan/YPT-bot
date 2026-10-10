@@ -6,9 +6,10 @@ A Node.js & Express service for querying YPT (Yeolpumta) study group analytics w
 
 - **CLI Interactive Authentication**: Prompts for your YPT account email and password when started.
 - **Joined Groups Discovery**: Fetches all groups the account belongs to (`/group/groups/v2`) and displays them in a structured table.
-- **Member Study Hours Logging**: Automatically fetches and logs all group members, their recorded study durations, active status, and subjects in a clean table on startup and every hour.
+- **Unified Single-Grid Member Leaderboard**: Automatically consolidates all members across all joined groups/channels into a single unified grid, deduplicating members who belong to multiple groups while preserving their highest study times, live status, and group memberships.
 - **Search Within Joined Groups**: Filter joined groups by name, category, or ID via the Express REST API (`GET /groups?q=...`).
-- **Live Member Analytics**: Fetch real-time member study durations, ongoing status, and subjects (`GET /groups/:groupId/members`).
+- **Unified Members API**: Query all deduplicated members across all groups/channels (`GET /members`).
+- **Live Member Analytics**: Fetch real-time member study durations, ongoing status, and subjects for a specific group (`GET /groups/:groupId/members`).
 
 ---
 
@@ -42,11 +43,12 @@ Enter YPT Password: yourpassword
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/health` | Server status and authenticated account info. |
+| `GET` | `/members` | **Unified Members**: Consolidated and deduplicated members across all joined groups/channels. Supports `?q=<keyword>` and `?log=true`. |
 | `GET` | `/groups` | List all joined groups. |
 | `GET` | `/groups?q=<keyword>` | Search / filter joined groups by keyword (ID, name, category, owner). |
 | `GET` | `/groups?refresh=true` | Force refresh joined groups directly from YPT servers. |
 | `GET` | `/groups/:groupId` | Get metadata for a specific joined group. |
-| `GET` | `/groups/:groupId/members` | **Hourly Analytics**: Returns all members with their live study status, today's accumulated study time, and active subjects. |
+| `GET` | `/groups/:groupId/members` | **Group Member Analytics**: Returns members of a specific group with live study status, today's accumulated study time, and active subjects. |
 
 ---
 

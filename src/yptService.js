@@ -247,3 +247,97 @@ export async function getGroupMembers(token, groupId) {
 
   return members;
 }
+
+/**
+ * Fetch and aggregate members from multiple groups/channels, removing duplicates.
+ * @param {string} token
+ * @param {Array<object>} groups
+ * @returns {Promise<{ members: Array<object>, totalRawCount: number, duplicatesRemoved: number, successfulGroups: number }>}
+ */
+export async function getAggregatedMembers(token, groups) {
+  if (!groups || groups.length === 0) {
+    return { members: [], totalRawCount: 0, duplicatesRemoved: 0, successfulGroups: 0 };
+  }
+
+  const results = await Promise.allSettled(
+    groups.map(async (group) => {
+      const members = await getGroupMembers(token, group.id);
+      return { group, members };
+    })
+  );
+
+  const memberMap = new Map();
+  let totalRawCount = 0;
+  let successfulGroups = 0;
+
+  for (const res of results) {
+    if (res.status === 'rejected') {
+      console.warn(`⚠️ Warning: Failed to fetch group members: ${res.reason?.message || res.reason}`);
+      continue;
+    }
+
+    successfulGroups++;
+    const { group, members } = res.value;
+    totalRawCount += members.length;
+
+    for (const member of members) {
+      if (!memberMap.has(member.userId)) {
+        memberMap.set(member.userId, {
+          ...member,
+          groupNames: [group.name],
+          groupIds: [group.id],
+        });
+      } else {
+        const existing = memberMap.get(member.userId);
+        if (!existing.groupIds.includes(group.id)) {
+          existing.groupIds.push(group.id);
+          existing.groupNames.push(group.name);
+        }
+
+        // Take highest study time
+        if (member.liveStudyMs > existing.liveStudyMs) {
+          existing.liveStudyMs = member.liveStudyMs;
+          existing.liveStudyTime = member.liveStudyTime;
+        }
+        if (member.todayStudyMs > existing.todayStudyMs) {
+          existing.todayStudyMs = member.todayStudyMs;
+          existing.todayStudyTime = member.todayStudyTime;
+        }
+
+        // Active studying takes priority
+        if (member.isStudying && !existing.isStudying) {
+          existing.isStudying = true;
+          existing.isPaused = member.isPaused;
+          existing.currentSubject = member.currentSubject;
+        } else if (member.isStudying && existing.isStudying) {
+          // If both studying, prioritize unpaused state
+          if (existing.isPaused && !member.isPaused) {
+            existing.isPaused = false;
+            existing.currentSubject = member.currentSubject || existing.currentSubject;
+          }
+        }
+
+        // Enrich missing metadata
+        if (!existing.category && member.category) {
+          existing.category = member.category;
+        }
+        if (member.hasCustomAvatar && !existing.hasCustomAvatar) {
+          existing.hasCustomAvatar = true;
+          existing.avatarUrl = member.avatarUrl;
+        }
+      }
+    }
+  }
+
+  const consolidatedMembers = Array.from(memberMap.values());
+  // Sort descending by liveStudyMs
+  consolidatedMembers.sort((a, b) => b.liveStudyMs - a.liveStudyMs);
+
+  return {
+    members: consolidatedMembers,
+    totalRawCount,
+    duplicatesRemoved: totalRawCount - consolidatedMembers.length,
+    successfulGroups,
+  };
+}
+
