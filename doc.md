@@ -207,10 +207,47 @@ Run the full automated test suite:
 npm test
 ```
 
-All 13 tests across 6 test suites validate:
+All 12 tests across 6 test suites validate:
 - Multi-group member aggregation and duplicate removal.
 - Fault tolerance when individual groups return errors.
 - Strict UTC date normalization and rollover safety.
-- Status derivation (`STUDYING`, `PAUSED`, `OFFLINE`).
+- Status derivation (`STUDYING` when studying/paused, `OFFLINE` when inactive).
 - Dynamic UTC challenge and participant resolution.
 - Historical Monday backfill, override preservation, and idempotency.
+
+---
+
+## 9. Deployment on Render
+
+The repository is configured for turnkey deployment on [Render](https://render.com).
+
+### Option 1: 1-Click Blueprint (`render.yaml`)
+1. In your Render Dashboard, click **New +** $\rightarrow$ **Blueprint**.
+2. Connect your Git repository. Render will automatically detect [`render.yaml`](file:///home/afnan/Projects/YPT/render.yaml).
+3. Populate the required environment secrets when prompted:
+   - `DATABASE_URL`: PostgreSQL pooler connection URI.
+   - `DIRECT_URL`: PostgreSQL direct session connection URI.
+   - `YPT_EMAIL`: Bot YPT login email.
+   - `YPT_PASSWORD`: Bot YPT password.
+4. Click **Apply**. Render will automatically build the service and start the web server with 5-minute background synchronization.
+
+### Option 2: Manual Web Service Setup
+1. In the Render Dashboard, click **New +** $\rightarrow$ **Web Service**.
+2. Connect your repository and configure:
+   - **Environment**: `Node`
+   - **Build Command**: `npm install && npm run build` *(or `npm install && npx prisma generate`)*
+   - **Start Command**: `npm start`
+   - **Health Check Path**: `/health`
+3. Under **Environment Variables**, add:
+   - `DATABASE_URL`: Your Supabase pooler URL
+   - `DIRECT_URL`: Your Supabase direct URL
+   - `YPT_EMAIL`: Your YPT account email
+   - `YPT_PASSWORD`: Your YPT account password
+   - `YPT_GROUP_IDS`: `6814572,7393477`
+   - `REFRESH_INTERVAL_MINUTES`: `5` (runs ingestion every 5 minutes)
+   - `NODE_ENV`: `production`
+
+### Option 3: Headless Background Worker or Cron Job
+- **Background Worker**: Set Start Command to `npm run ingest:watch`.
+- **Render Cron Job**: Set Schedule to `*/5 * * * *` and Command to `npm run ingest`.
+

@@ -9,6 +9,7 @@ import {
   getAggregatedMembers,
 } from './yptService.js';
 import { ingestGroupMembersToDailyStudyLogs } from './sync/ingestStudyLogs.js';
+import { env } from './config/env.js';
 
 // Global state holding session and cached joined groups
 const state = {
@@ -21,10 +22,10 @@ const state = {
  * Interactive prompt for Email and Password in CLI
  */
 async function promptCredentials() {
-  if (process.env.YPT_EMAIL && process.env.YPT_PASSWORD) {
+  if (env.YPT_EMAIL && env.YPT_PASSWORD) {
     return {
-      email: process.env.YPT_EMAIL.trim(),
-      password: process.env.YPT_PASSWORD.trim(),
+      email: env.YPT_EMAIL,
+      password: env.YPT_PASSWORD,
     };
   }
 
@@ -337,8 +338,8 @@ async function startServer() {
       }
     });
 
-    const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => {
+    const PORT = env.PORT || process.env.PORT || 3000;
+    app.listen(PORT, '0.0.0.0', () => {
       console.log(`\n🚀 YPT Analytics Server listening on http://localhost:${PORT}`);
       console.log('   Available API Endpoints:');
       console.log(`   - GET  http://localhost:${PORT}/members             (Unified deduplicated members list)`);
