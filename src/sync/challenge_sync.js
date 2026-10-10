@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { prisma } from '../db.js';
 import { env } from '../config/env.js';
+import { clampDailyStudySeconds, MAX_DAILY_STUDY_SECONDS } from '../config/limits.js';
 import { getActiveChallenge, getParticipantMap } from '../db/challengeService.js';
 import { computeUtcLogDate, deriveStudyStatus } from './ingestStudyLogs.js';
 import { signIn, splashLogin, getAggregatedMembers } from '../yptService.js';
@@ -95,6 +96,7 @@ export async function syncChallengeFromMonday(options = {}) {
 
   let historicalUpserted = 0;
   let skippedExistingOverrides = 0;
+  let historicalCapped = 0;
 
   for (const row of historicalRows) {
     const rowLogDate = computeUtcLogDate(row.logDate);
@@ -119,7 +121,9 @@ export async function syncChallengeFromMonday(options = {}) {
       continue;
     }
 
-    const durationSeconds = Math.max(0, Number(row.durationSeconds || 0));
+    const rawSeconds = Number(row.durationSeconds || 0);
+    const durationSeconds = clampDailyStudySeconds(rawSeconds);
+    if (rawSeconds > MAX_DAILY_STUDY_SECONDS) historicalCapped++;
     const status = 'OFFLINE';
 
     await prisma.dailyStudyLogV2.upsert({
@@ -150,12 +154,13 @@ export async function syncChallengeFromMonday(options = {}) {
     historicalUpserted++;
   }
 
-  log(`✅ [Phase 1 Complete] Upserted ${historicalUpserted} historical records (Protected ${skippedExistingOverrides} existing V2 overrides).`);
+  log(`✅ [Phase 1 Complete] Upserted ${historicalUpserted} historical records (Protected ${skippedExistingOverrides} existing V2 overrides, Capped ${historicalCapped} at 14h).`);
 
   // 3. Phase 2: Today's Live Ingestion from YPT
   let liveUpserted = 0;
   let liveMatched = 0;
   let liveOverridesSkipped = 0;
+  let liveCapped = 0;
 
   if (skipYpt) {
     log('\n⏭️ [Phase 2] Skipping live YPT scraping as requested (skipYpt=true).');
@@ -188,7 +193,9 @@ export async function syncChallengeFromMonday(options = {}) {
           Number(member.todayStudyMs || 0),
           Number(member.studyMs || 0)
         );
-        const durationSeconds = Math.max(0, Math.floor(studyMs / 1000));
+        const rawSeconds = Math.floor(studyMs / 1000);
+        const durationSeconds = clampDailyStudySeconds(rawSeconds);
+        if (rawSeconds > MAX_DAILY_STUDY_SECONDS) liveCapped++;
         const status = deriveStudyStatus(member);
 
         const existingV2 = await prisma.dailyStudyLogV2.findUnique({
@@ -237,7 +244,7 @@ export async function syncChallengeFromMonday(options = {}) {
         liveUpserted++;
       }
 
-      log(`✅ [Phase 2 Complete] Matched ${liveMatched} participants, upserted ${liveUpserted} live logs (${liveOverridesSkipped} overrides protected).`);
+      log(`✅ [Phase 2 Complete] Matched ${liveMatched} participants, upserted ${liveUpserted} live logs (${liveOverridesSkipped} overrides protected, ${liveCapped} capped at 14h).`);
     } catch (err) {
       console.error('❌ [Phase 2 Error] Failed to scrape live YPT data:', err.message);
     }
@@ -284,9 +291,11 @@ export async function syncChallengeFromMonday(options = {}) {
     todayUtc,
     historicalUpserted,
     skippedExistingOverrides,
+    historicalCapped,
     liveMatched,
     liveUpserted,
     liveOverridesSkipped,
+    liveCapped,
     dailySummary,
     durationMs,
   };

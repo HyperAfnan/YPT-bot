@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { prisma } from '../db.js';
 import { env } from '../config/env.js';
+import { clampDailyStudySeconds, MAX_DAILY_STUDY_SECONDS } from '../config/limits.js';
 import { getActiveChallenge, getParticipantMap } from '../db/challengeService.js';
 import { signIn, splashLogin, getAggregatedMembers } from '../yptService.js';
 
@@ -76,6 +77,7 @@ export async function ingestGroupMembersToDailyStudyLogs(groupId, members, nowUt
   let matchedCount = 0;
   let unlinkedCount = 0;
   let skippedOverrides = 0;
+  let cappedCount = 0;
   let upsertedCount = 0;
 
   const upsertOperations = [];
@@ -100,7 +102,9 @@ export async function ingestGroupMembersToDailyStudyLogs(groupId, members, nowUt
       Number(member.todayStudyMs || 0),
       Number(member.studyMs || 0)
     );
-    const durationSeconds = Math.max(0, Math.floor(studyMs / 1000));
+    const rawSeconds = Math.floor(studyMs / 1000);
+    const durationSeconds = clampDailyStudySeconds(rawSeconds);
+    if (rawSeconds > MAX_DAILY_STUDY_SECONDS) cappedCount++;
     const status = deriveStudyStatus(member);
 
     // 4. Admin Override Safety (Law L5)
@@ -151,7 +155,7 @@ export async function ingestGroupMembersToDailyStudyLogs(groupId, members, nowUt
   const durationMs = Date.now() - startTime;
   console.log(
     `✅ [Ingest] Challenge "${challenge.title}" (${challenge.id}) | Date: ${logDate.toISOString().slice(0, 10)} UTC: ` +
-    `${matchedCount} matched, ${upsertedCount} upserted, ${skippedOverrides} overrides protected, ${unlinkedCount} unlinked (${durationMs}ms)`
+    `${matchedCount} matched, ${upsertedCount} upserted, ${skippedOverrides} overrides protected, ${cappedCount} capped at 14h, ${unlinkedCount} unlinked (${durationMs}ms)`
   );
 
   return {
@@ -162,6 +166,7 @@ export async function ingestGroupMembersToDailyStudyLogs(groupId, members, nowUt
     matchedCount,
     unlinkedCount,
     skippedOverrides,
+    cappedCount,
     upsertedCount,
     durationMs,
   };
